@@ -9,12 +9,13 @@ import requests
 from typing import Optional, Dict, List, Any
 import shapely.wkt
 from shapely.geometry import mapping
+import os
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for frontend access
 
 # GraphDB Configuration
-GRAPHDB_URL = "http://DESKTOP-FV6EDVG:7200/repositories/city_facilities"
+GRAPHDB_URL = os.environ.get("GRAPHDB_URL", "http://DESKTOP-FV6EDVG:7200/repositories/city_facilities")
 NAMESPACE = "http://example.org/dcc/facilities#"
 
 # Mapping of user-friendly IDs to URIs
