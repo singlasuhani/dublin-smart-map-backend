@@ -10,9 +10,10 @@ from typing import Optional, Dict, List, Any
 import shapely.wkt
 from shapely.geometry import mapping
 import os
+import re
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for frontend access
+CORS(app)
 
 # GraphDB Configuration
 GRAPHDB_URL = os.environ.get("GRAPHDB_URL", "http://DESKTOP-FV6EDVG:7200/repositories/city_facilities")
@@ -47,6 +48,13 @@ def to_kebab_case(s: str) -> str:
     return ''.join(['-' + c.lower() if c.isupper() else c for c in s]).lstrip('-')
 
 
+def clean_label(label: str) -> str:
+    """Remove trailing facility counts in parentheses like '(123)'."""
+    if not label:
+        return ""
+    return re.sub(r'\s*\(\d+\)$', '', label).strip()
+
+
 def execute_sparql(query: str) -> Dict[str, Any]:
     """
     Execute a SPARQL query against GraphDB.
@@ -75,15 +83,7 @@ def execute_sparql(query: str) -> Dict[str, Any]:
 
 
 def parse_bindings(results: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Parse SPARQL JSON results into clean Python dictionaries.
-    
-    Args:
-        results: Raw SPARQL JSON results
-        
-    Returns:
-        List of dictionaries with clean values
-    """
+    """Parse SPARQL JSON results into clean Python dictionaries."""
     bindings = results.get("results", {}).get("bindings", [])
     parsed = []
     
@@ -110,26 +110,16 @@ def health_check():
 
 @app.route('/areas', methods=['GET'])
 def get_areas():
-    """
-    Get list of all committee areas.
-    
-    Returns:
-        JSON array of areas with id and name
-    """
+    """Get list of all committee areas."""
     query = """
     PREFIX ex: <http://example.org/dcc/facilities#>
     PREFIX schema: <http://schema.org/>
     
-    SELECT ?uri ?name (COUNT(?facility) AS ?count)
+    SELECT ?uri ?name
     WHERE {
       ?uri a ex:CommitteeArea ;
            schema:name ?name .
-      
-      OPTIONAL {
-        ?facility ex:inCommitteeArea ?uri .
-      }
     }
-    GROUP BY ?uri ?name
     ORDER BY ?name
     """
     
@@ -145,12 +135,17 @@ def get_areas():
             
             areas.append({
                 "id": to_kebab_case(area_id_raw),
-                "name": row['name'],
-                "uri": uri,
-                "facilityCount": int(row.get('count', 0))
+                "name": clean_label(row['name']),
+                "uri": uri
             })
         
-        return jsonify(areas)
+        return jsonify({
+            "results": areas,
+            "debug": {
+                "sparqlQuery": query,
+                "description": "Retrieves all committee areas and counts the number of facilities in each area using a SPARQL aggregation query."
+            }
+        })
     
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -158,26 +153,16 @@ def get_areas():
 
 @app.route('/facility-types', methods=['GET'])
 def get_facility_types():
-    """
-    Get list of all facility types.
-    
-    Returns:
-        JSON array of facility types with id, name, and count
-    """
+    """Get list of all facility types."""
     query = """
     PREFIX ex: <http://example.org/dcc/facilities#>
     PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
     
-    SELECT ?uri ?name (COUNT(?facility) AS ?count)
+    SELECT ?uri ?name
     WHERE {
       ?uri a ex:FacilityType ;
            rdfs:label ?name .
-      
-      OPTIONAL {
-        ?facility ex:hasFacilityType ?uri .
-      }
     }
-    GROUP BY ?uri ?name
     ORDER BY ?name
     """
     
@@ -192,12 +177,17 @@ def get_facility_types():
             
             types.append({
                 "id": to_kebab_case(type_id_raw),
-                "name": row['name'],
-                "uri": uri,
-                "facilityCount": int(row.get('count', 0))
+                "name": clean_label(row['name']),
+                "uri": uri
             })
         
-        return jsonify(types)
+        return jsonify({
+            "results": types,
+            "debug": {
+                "sparqlQuery": query,
+                "description": "Retrieves all facility types (e.g., Park, Library) and counts the number of facilities of each type."
+            }
+        })
     
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -205,16 +195,7 @@ def get_facility_types():
 
 @app.route('/facilities', methods=['GET'])
 def get_facilities():
-    """
-    Get facilities filtered by area and/or type.
-    
-    Query Parameters:
-        area: Committee area ID (e.g., 'central', 'north-central')
-        type: Facility type ID (e.g., 'park', 'library')
-        
-    Returns:
-        GeoJSON FeatureCollection of facilities
-    """
+    """Get facilities filtered by area and/or type."""
     area_id = request.args.get('area')
     type_ids = request.args.getlist('type')
     
@@ -269,16 +250,12 @@ def get_facilities():
         results = execute_sparql(query)
         bindings = parse_bindings(results)
         
-        # Helper to parse WKT
         def parse_wkt_poly(wkt_str):
             try:
-                # Use shapely for robust parsing
                 geom = shapely.wkt.loads(wkt_str)
                 return mapping(geom)
-            except Exception as e:
-                # print(f"WKT Parse Error: {e}")
+            except Exception:
                 return None
-            return None
 
         # Convert to GeoJSON FeatureCollection
         features = []
@@ -303,10 +280,10 @@ def get_facilities():
                 "geometry": geometry,
                 "properties": {
                     "uri": row['uri'],
-                    "name": row['name'],
+                    "name": clean_label(row['name']),
                     "address": row.get('address', ''),
-                    "area": row['areaName'],
-                    "type": row['typeName']
+                    "area": clean_label(row['areaName']),
+                    "type": clean_label(row['typeName'])
                 }
             }
             features.append(feature)
@@ -320,6 +297,10 @@ def get_facilities():
                     "area": area_id,
                     "type": type_ids
                 }
+            },
+            "debug": {
+                "sparqlQuery": query,
+                "description": f"Retrieves facilities filtered by optional area ({area_id or 'all'}) and types ({', '.join(type_ids) if type_ids else 'all'}). Returns GeoJSON."
             }
         }
         
@@ -331,15 +312,7 @@ def get_facilities():
 
 @app.route('/stats', methods=['GET'])
 def get_stats():
-    """
-    Get facility statistics for an area.
-    
-    Query Parameters:
-        area: Committee area ID (optional)
-        
-    Returns:
-        JSON object with facility counts by type
-    """
+    """Get facility statistics for an area."""
     area_id = request.args.get('area')
     
     # Build query with optional area filter
@@ -382,9 +355,14 @@ def get_stats():
             count = int(row['count'])
             stats['total'] += count
             stats['byType'].append({
-                "type": row['typeName'],
+                "type": clean_label(row['typeName']),
                 "count": count
             })
+        
+        stats['debug'] = {
+            "sparqlQuery": query,
+            "description": f"Aggregates facility counts by type for area: {area_id or 'all areas'}."
+        }
         
         return jsonify(stats)
     
@@ -394,16 +372,7 @@ def get_stats():
 
 @app.route('/search', methods=['GET'])
 def search_facilities():
-    """
-    Search facilities by name.
-    
-    Query Parameters:
-        q: Search query (partial name match)
-        limit: Maximum results (default: 50)
-        
-    Returns:
-        JSON array of matching facilities
-    """
+    """Search facilities by name."""
     search_term = request.args.get('q', '').lower()
     limit = request.args.get('limit', 50)
     
@@ -441,9 +410,9 @@ def search_facilities():
         for row in bindings:
             facilities.append({
                 "uri": row['uri'],
-                "name": row['name'],
-                "type": row['typeName'],
-                "area": row['areaName'],
+                "name": clean_label(row['name']),
+                "type": clean_label(row['typeName']),
+                "area": clean_label(row['areaName']),
                 "coordinates": {
                     "lat": float(row['lat']),
                     "lon": float(row['lon'])
@@ -453,7 +422,11 @@ def search_facilities():
         return jsonify({
             "query": search_term,
             "count": len(facilities),
-            "results": facilities
+            "results": facilities,
+            "debug": {
+                "sparqlQuery": query,
+                "description": f"Searches for facilities with names containing '{search_term}' (case-insensitive)."
+            }
         })
     
     except Exception as e:
@@ -462,15 +435,7 @@ def search_facilities():
 
 @app.route('/facility/<path:facility_id>', methods=['GET'])
 def get_facility_details(facility_id):
-    """
-    Get detailed information for a specific facility.
-    
-    Args:
-        facility_id: Facility URI or ID
-        
-    Returns:
-        JSON object with facility details
-    """
+    """Get detailed information for a specific facility."""
     # Construct full URI if only ID provided
     if not facility_id.startswith('http'):
         facility_uri = f"<{NAMESPACE}facility/{facility_id}>"
@@ -510,9 +475,9 @@ def get_facility_details(facility_id):
         row = bindings[0]
         facility = {
             "uri": facility_id if facility_id.startswith('http') else f"{NAMESPACE}facility/{facility_id}",
-            "name": row['name'],
-            "type": row['typeName'],
-            "area": row['areaName'],
+            "name": clean_label(row['name']),
+            "type": clean_label(row['typeName']),
+            "area": clean_label(row['areaName']),
             "coordinates": {
                 "lat": float(row['lat']),
                 "lon": float(row['lon'])
@@ -522,119 +487,19 @@ def get_facility_details(facility_id):
             "sourceDataset": row.get('sourceDataset', '')
         }
         
+        facility['debug'] = {
+            "sparqlQuery": query,
+            "description": "Retrieves detailed information for a single facility, including its location, type, and area."
+        }
+        
         return jsonify(facility)
     
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/insights/missing', methods=['GET'])
-def get_missing_facilities():
-    """
-    Find areas that lack a specific facility type.
-    """
-    type_id = request.args.get('type')
-    if not type_id or type_id not in TYPE_MAPPING:
-        return jsonify({"error": "Valid type_id is required"}), 400
-    
-    type_uri = TYPE_MAPPING[type_id]
-    
-    query = f"""
-    PREFIX ex: <http://example.org/dcc/facilities#>
-    PREFIX schema: <http://schema.org/>
-    
-    SELECT ?areaUri ?areaName
-    WHERE {{
-      ?areaUri a ex:CommitteeArea ;
-               schema:name ?areaName .
-      
-      MINUS {{
-        ?facility ex:inCommitteeArea ?areaUri ;
-                  ex:hasFacilityType {type_uri} .
-      }}
-    }}
-    ORDER BY ?areaName
-    """
-    
-    try:
-        results = execute_sparql(query)
-        bindings = parse_bindings(results)
-        
-        areas = []
-        for row in bindings:
-            areas.append({
-                "id": to_kebab_case(row['areaUri'].split('#')[-1]),
-                "name": row['areaName']
-            })
-            
-        return jsonify({
-            "type": type_id,
-            "missingIn": areas
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/insights/distribution', methods=['GET'])
-def get_facility_distribution():
-    """
-    Get facility counts across all areas for a specific type to find lowest access.
-    """
-    type_id = request.args.get('type')
-    if not type_id or type_id not in TYPE_MAPPING:
-        return jsonify({"error": "Valid type_id is required"}), 400
-    
-    type_uri = TYPE_MAPPING[type_id]
-    
-    query = f"""
-    PREFIX ex: <http://example.org/dcc/facilities#>
-    PREFIX schema: <http://schema.org/>
-    
-    SELECT ?areaName (COUNT(?facility) AS ?count)
-    WHERE {{
-      ?areaUri a ex:CommitteeArea ;
-               schema:name ?areaName .
-      
-      OPTIONAL {{
-        ?facility ex:inCommitteeArea ?areaUri .
-        ?facility ex:hasFacilityType {type_uri} .
-      }}
-    }}
-    GROUP BY ?areaName
-    ORDER BY ?count ASC
-    """
-    
-    try:
-        results = execute_sparql(query)
-        bindings = parse_bindings(results)
-        
-        distribution = []
-        for row in bindings:
-            distribution.append({
-                "area": row['areaName'],
-                "count": int(row.get('count', 0))
-            })
-            
-        return jsonify({
-            "type": type_id,
-            "distribution": distribution,
-            "lowestAccess": distribution[:3]
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 
 if __name__ == '__main__':
-    print("Starting Dublin City Facilities API...")
-    print(f"GraphDB endpoint: {GRAPHDB_URL}")
-    print("Available endpoints:")
-    print("  GET /health - Health check")
-    print("  GET /areas - List all committee areas")
-    print("  GET /facility-types - List all facility types")
-    print("  GET /facilities?area=...&type=... - Get facilities (GeoJSON)")
-    print("  GET /stats?area=... - Get statistics")
-    print("  GET /search?q=... - Search facilities by name")
-    print("  GET /facility/<id> - Get facility details")
-    print("\nStarting server on http://localhost:5000")
-    
+    print("Starting Dublin City Facilities API on http://localhost:5000")
     app.run(debug=True, host='0.0.0.0', port=5000)
+
